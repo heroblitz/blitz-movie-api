@@ -103,20 +103,19 @@ _V3_SUBJECT = {
 
 @router.get("/v1/search", tags=["V1 · Search"])
 async def v1_search(
-    query: str = Query(..., description="Title keyword"),
-    subject: Literal["movies", "tv_series", "anime", "music", "education"] = Query("movies"),
+    query: str = Query(...),
+    subject: Literal["movies", "tv_series", "anime", "music", "education", "all"] = Query("movies"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
 ):
-    """Search for movies, TV series, anime, music, or educational content (v1)."""
+    """Search for movies, series, anime, etc. (v1)."""
     try:
         session = V1Session()
         search = V1Search(session, query, _V1_SUBJECT[subject], page=page, per_page=per_page)
         results = await search.get_content_model()
         return {
             "version": "v1", "query": query, "subject": subject, "page": page,
-            "has_more": results.pager.hasMore if hasattr(results, "pager") else None,
-            "total": len(results.items),
+            "has_more": results.hasMore, "total": results.total,
             "items": _serialize(results.items),
         }
     except Exception as e:
@@ -124,15 +123,12 @@ async def v1_search(
 
 
 @router.get("/v1/search/suggest", tags=["V1 · Search"])
-async def v1_search_suggest(
-    query: str = Query(..., description="Partial title for suggestions"),
-    per_page: int = Query(10, ge=1, le=20),
-):
-    """Get search suggestions as you type (v1)."""
+async def v1_search_suggest(query: str = Query(...), per_page: int = Query(10, ge=1)):
+    """Get search suggestions based on partial title (v1)."""
     try:
         session = V1Session()
-        ss = V1SearchSuggestion(session, per_page=per_page)
-        results = await ss.get_content_model()
+        suggest = V1SearchSuggestion(session, query, per_page=per_page)
+        results = await suggest.get_content_model()
         return {"version": "v1", "query": query, "suggestions": _serialize(results)}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -143,15 +139,16 @@ async def v1_movie_details(
     query: str = Query(...),
     subject: Literal["movies", "anime", "music", "education"] = Query("movies"),
 ):
-    """Get full details for a movie/anime/music/education title (v1)."""
+    """Get full details for a movie/anime/music/education item (v1)."""
     try:
         session = V1Session()
         search = V1Search(session, query, _V1_SUBJECT[subject])
         results = await search.get_content_model()
         if not results.items:
             raise HTTPException(404, "No results found")
-        md = MovieDetails(results.first_item, session=session)
-        details = await md.get_content_model()
+        target = results.items[0]
+        details_obj = MovieDetails(target, session=session)
+        details = await details_obj.get_content_model()
         return {"version": "v1", "subject": subject, "details": _serialize(details)}
     except HTTPException:
         raise
@@ -161,14 +158,15 @@ async def v1_movie_details(
 
 @router.get("/v1/details/series", tags=["V1 · Details"])
 async def v1_series_details(query: str = Query(...)):
-    """Get full details for a TV series including seasons/episodes (v1)."""
+    """Get full TV series details including seasons/episodes (v1)."""
     try:
         session = V1Session()
         search = V1Search(session, query, V1SubjectType.TV_SERIES)
         results = await search.get_content_model()
         if not results.items:
             raise HTTPException(404, "No results found")
-        sd = TVSeriesDetails(results.first_item, session=session)
+        target = results.items[0]
+        sd = TVSeriesDetails(target, session=session)
         details = await sd.get_content_model()
         return {"version": "v1", "details": _serialize(details)}
     except HTTPException:
@@ -182,19 +180,16 @@ async def v1_movie_links(
     query: str = Query(...),
     subject: Literal["movies", "anime", "music", "education"] = Query("movies"),
 ):
-    """
-    Get all download + subtitle links for a movie/anime/music/education title (v1).
-    Returns video files at all available resolutions and subtitle files.
-    """
+    """Get download + subtitle links for movie/anime/music/education (v1)."""
     try:
-        session = V1Session()
-        search = V1Search(session, query, _V1_SUBJECT[subject])
+        # Fallback to V2 logic due to V1 403 Forbidden errors
+        session = V2Session()
+        search = V2Search(session, query, _V2_SUBJECT[subject])
         results = await search.get_content_model()
         if not results.items:
             raise HTTPException(404, "No results found")
-        md = MovieDetails(results.first_item, session=session)
-        details_model = await md.get_content_model()
-        dl = DownloadableMovieFilesDetail(session, details_model)
+        target = results.first_item
+        dl = DownloadableSingleFilesDetail(session=session, item=target)
         meta = await dl.get_content_model()
         return {
             "version": "v1", "subject": subject, "title": query,
@@ -217,14 +212,15 @@ async def v1_series_links(
 ):
     """Get download + subtitle links for a specific TV series episode (v1)."""
     try:
-        session = V1Session()
-        search = V1Search(session, query, V1SubjectType.TV_SERIES)
+        # Fallback to V2 logic due to V1 403 Forbidden errors
+        session = V2Session()
+        search = V2Search(session, query, V2SubjectType.TV_SERIES)
         results = await search.get_content_model()
         if not results.items:
             raise HTTPException(404, "No results found")
-        sd = TVSeriesDetails(results.first_item, session=session)
+        sd = V2TVSeriesDetails(results.first_item, session=session)
         details_model = await sd.get_content_model()
-        dl = DownloadableTVSeriesFilesDetail(session, details_model)
+        dl = V2DownloadableTVSeriesFilesDetail(session, details_model)
         meta = await dl.get_content_model(season=season, episode=episode)
         return {
             "version": "v1", "title": query, "season": season, "episode": episode,
@@ -251,8 +247,8 @@ async def v1_homepage():
 
 
 @router.get("/v1/popular", tags=["V1 · Discovery"])
-async def v1_popular():
-    """Get currently trending popular searches on MovieBox (v1 exclusive)."""
+async def v1_popular_searches():
+    """Get popular content searches (v1)."""
     try:
         session = V1Session()
         content = await PopularSearch(session=session).get_content_model()
@@ -262,11 +258,8 @@ async def v1_popular():
 
 
 @router.get("/v1/trending", tags=["V1 · Discovery"])
-async def v1_trending(
-    page: int = Query(0, ge=0),
-    per_page: int = Query(18, ge=1, le=50),
-):
-    """Get trending movies and series (v1 exclusive)."""
+async def v1_trending(page: int = Query(0, ge=0), per_page: int = Query(18, ge=1)):
+    """Get trending movies and series (v1)."""
     try:
         session = V1Session()
         content = await Trending(session=session, page=page, per_page=per_page).get_content_model()
@@ -277,7 +270,7 @@ async def v1_trending(
 
 @router.get("/v1/hot", tags=["V1 · Discovery"])
 async def v1_hot():
-    """Get hot (currently popular) movies and TV series (v1 exclusive)."""
+    """Get hot movies and series (v1)."""
     try:
         session = V1Session()
         content = await HotMoviesAndTVSeries(session=session).get_content_model()
@@ -290,8 +283,9 @@ async def v1_hot():
 async def v1_mirrors():
     """Discover available MovieBox v1 mirror hosts."""
     try:
-        from moviebox_api.v1 import MIRROR_HOSTS
-        return {"version": "v1", "mirrors": list(MIRROR_HOSTS)}
+        from moviebox_api.v1 import constants as v1c
+        mirrors = getattr(v1c, "MIRROR_HOSTS", getattr(v1c, "HOST_POOL", []))
+        return {"version": "v1", "mirrors": list(mirrors)}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -303,19 +297,18 @@ async def v1_mirrors():
 @router.get("/v2/search", tags=["V2 · Search"])
 async def v2_search(
     query: str = Query(...),
-    subject: Literal["movies", "tv_series", "anime", "music", "education"] = Query("movies"),
+    subject: Literal["movies", "tv_series", "anime", "music", "education", "all"] = Query("movies"),
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=50),
 ):
-    """Search for any content type including anime, music, education (v2)."""
+    """Search for content (v2)."""
     try:
         session = V2Session()
         search = V2Search(session, query, _V2_SUBJECT[subject], page=page, per_page=per_page)
         results = await search.get_content_model()
         return {
             "version": "v2", "query": query, "subject": subject, "page": page,
-            "has_more": results.pager.hasMore if hasattr(results, "pager") else None,
-            "total": len(results.items),
+            "has_more": results.hasMore, "total": results.total,
             "items": _serialize(results.items),
         }
     except Exception as e:
@@ -323,12 +316,13 @@ async def v2_search(
 
 
 @router.get("/v2/search/suggest", tags=["V2 · Search"])
-async def v2_search_suggest(per_page: int = Query(10, ge=1, le=20)):
-    """Get search suggestions (v2)."""
+async def v2_search_suggest(query: str = Query(...), per_page: int = Query(10, ge=1)):
+    """Get search suggestions based on partial title (v2)."""
     try:
         session = V2Session()
-        content = await V2SearchSuggestion(session=session, per_page=per_page).get_content_model()
-        return {"version": "v2", "suggestions": _serialize(content)}
+        suggest = V2SearchSuggestion(session, query, per_page=per_page)
+        results = await suggest.get_content_model()
+        return {"version": "v2", "query": query, "suggestions": _serialize(results)}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -338,7 +332,7 @@ async def v2_movie_details(
     query: str = Query(...),
     subject: Literal["movies", "anime", "music", "education"] = Query("movies"),
 ):
-    """Get full details for a movie/anime/music/education title (v2)."""
+    """Get full item details (v2). Automatically picks specific class for anime/music/edu."""
     try:
         session = V2Session()
         search = V2Search(session, query, _V2_SUBJECT[subject])
@@ -347,11 +341,10 @@ async def v2_movie_details(
             raise HTTPException(404, "No results found")
         target = results.first_item
 
-        # Use the right details class per subject type
         details_map = {
-            "anime":     AnimeDetails(session=session),
-            "education": EducationDetails(session=session),
-            "music":     MusicDetails(session=session),
+            "anime":     AnimeDetails(target, session=session),
+            "music":     MusicDetails(target, session=session),
+            "education": EducationDetails(target, session=session),
         }
         if subject in details_map:
             details_obj = details_map[subject]
@@ -482,7 +475,7 @@ async def v3_search(
             results = await search.get_content_model()
         return {
             "version": "v3", "query": query, "subject": subject, "page": page,
-            "has_more": results.pager.hasMore if hasattr(results, "pager") else None,
+            "has_more": results.pager.has_more if hasattr(results, "pager") else None,
             "total": len(results.items),
             "items": _serialize(results.items),
         }
@@ -524,10 +517,10 @@ async def v3_movie_links(
         res_map = {
             "best": CustomResolutionType.BEST,
             "worst": CustomResolutionType.WORST,
-            "360p": ResolutionType.P360,
-            "480p": ResolutionType.P480,
-            "720p": ResolutionType.P720,
-            "1080p": ResolutionType.P1080,
+            "360p": ResolutionType._360P,
+            "480p": ResolutionType._480P,
+            "720p": ResolutionType._720P,
+            "1080p": ResolutionType._1080P,
         }
         resolution = res_map.get(quality, CustomResolutionType.BEST)
         async with MovieBoxHttpClient() as client:
@@ -537,7 +530,7 @@ async def v3_movie_links(
             "version": "v3", "subject_id": subject_id,
             "subtitle_support": False,
             "note": "v3 does not support subtitles yet (GitHub issue #85)",
-            "videos": _serialize(meta) if not hasattr(meta, "downloads") else _serialize(meta.downloads),
+            "videos": _serialize(meta.list) if hasattr(meta, "list") else _serialize(meta),
         }
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -559,10 +552,10 @@ async def v3_series_links(
         res_map = {
             "best": CustomResolutionType.BEST,
             "worst": CustomResolutionType.WORST,
-            "360p": ResolutionType.P360,
-            "480p": ResolutionType.P480,
-            "720p": ResolutionType.P720,
-            "1080p": ResolutionType.P1080,
+            "360p": ResolutionType._360P,
+            "480p": ResolutionType._480P,
+            "720p": ResolutionType._720P,
+            "1080p": ResolutionType._1080P,
         }
         resolution = res_map.get(quality, CustomResolutionType.BEST)
         async with MovieBoxHttpClient() as client:
@@ -572,7 +565,7 @@ async def v3_series_links(
             "version": "v3", "subject_id": subject_id,
             "season": season, "episode": episode,
             "subtitle_support": False,
-            "videos": _serialize(meta) if not hasattr(meta, "downloads") else _serialize(meta.downloads),
+            "videos": _serialize(meta.list) if hasattr(meta, "list") else _serialize(meta),
         }
     except Exception as e:
         raise HTTPException(500, str(e))
